@@ -4,7 +4,7 @@ from sklearn.decomposition import PCA
 import cv2
 import imageio as io
 
-import visdom
+#import visdom
 import time
 import PIL
 import torchvision

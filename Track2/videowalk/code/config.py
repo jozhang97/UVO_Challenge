@@ -15,7 +15,7 @@ C.root_dir = osp.realpath(".")
 exp_time = time.strftime('%Y_%m_%d_%H_%M_%S', time.localtime())
 
 """Opflow Model Config"""
-C.opflow_model_path = 'PATH/TO/YOUR/raft-things.pth'
+C.opflow_model_path = '/scratch/cluster/jozhang/models/raft-things.pth'
 C.small = False
 C.mixed_precision = False
 C.alternate_corr = False

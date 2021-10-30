@@ -2,6 +2,13 @@
 This is an official repo for our UVO Challenge solutions for Video-based open-world segmentation.
 Code based on [videowalk](https://github.com/ajabri/videowalk)
 
+videowalk
+- videowalk/code/{data,eval,utils_videowalk,model.py} are identical
+- videowalk/code/utils_videowalk/test_utils.py has `context_index_bank`
+
+RAFT
+- videowalk/code/core/{raft,corr}.py switches to MemoryEfficientRAFT
+
 ## Before Start
 Make sure that you saved your **per-frame** predictions in a folder, with the structure described below:
 ```

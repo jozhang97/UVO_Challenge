@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import argparse
 import os
 import cv2
 import time
@@ -238,6 +239,7 @@ class SingleVideo(object):
         masks_ids.sort()
         self.masks_path = [masks_path + '/' + str(i) + '.json' for i in masks_ids]
         self.images_path = [images_path + '/' + str(i) + '.png' for i in masks_ids]
+        assert len(self.masks_path) == len(self.images_path)
         self.mask_per_frame = mask_per_frame
         self.nms_thre = nms_thre
         self.mask_matching_thre = mask_matching_thre
@@ -255,7 +257,7 @@ class SingleVideo(object):
         self.load_imgs()
         self.load_flow()
         self.load_masks()
-        self.load_model()
+        # self.load_model()
         assert len(self.imgs) == len(self.masks)
         assert len(self.flows) == len(self.imgs) - 1
 
@@ -375,8 +377,9 @@ class SingleVideo(object):
 
         ori_h, ori_w, _ = self.imgs[0].shape
 
-        n_context = self.args.videoLen
-        assert n_context == 0
+        # not sure whats going on here
+        # n_context = self.args.videoLen
+        # assert n_context == 0
 
         print('******* (%s frames) *******' % (len(self.imgs)))
 
@@ -472,31 +475,42 @@ class SingleVideo(object):
             output.append(ins)
         return output
 
-
+def parse_args():
+    parser = argparse.ArgumentParser(description='run flow track')
+    parser.add_argument('--data-dir', default='./datasets/uvo/')
+    parser.add_argument('--ann-path',
+        default='./datasets/vuo/annotations/UVO_video_val_dense.json',
+        help='not liketao!')
+    parser.add_argument('--save-path', default='./subm.json')
+    args = parser.parse_args()
+    return args
 
 if __name__ == '__main__':
+    args = parse_args()
 
-    vids = json.load(open('PATH/TO/YOUR/UVO_video_test_dense.json', 'r'))['videos']
+    vids = json.load(open(args.ann_path, 'r'))['videos']
     name2id = dict()
     for i in vids:
         name2id[i['ytid']] = i['id']
 
     output = []
     for vid in vids:
-        print(vid)
-        single = SingleVideo('PATH/TO/YOUR/UVO_Dense_frames/' + vid + '/',
-                            'PATH/TO/YOUR/UVO_Prediction_for_frames/' + vid + '/',
+        vid_name = vid['ytid']
+        img_dir = f'{args.data_dir}/uvo_videos_dense_frames/{vid_name}/'
+        msk_dir = f'{args.data_dir}/resources/seg_val/{vid_name}/'
+        single = SingleVideo(img_dir,
+                            msk_dir,
                             100,
                             nms_thre=0.7,
                             mask_matching_thre=0.5,
                             patience=5)
         single.inference()
-        ins = single.format_submissions(name2id[vid], 5)
+        ins = single.format_submissions(name2id[vid_name], 5)
         output.extend(ins)
         del single
         torch.cuda.empty_cache()
 
-    with open('./subms.json', 'w') as w:
+    with open(args.save_path, 'w') as w:
         json.dump(output, w)
 
 
