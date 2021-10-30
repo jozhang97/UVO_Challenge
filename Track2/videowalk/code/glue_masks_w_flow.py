@@ -510,6 +510,7 @@ if __name__ == '__main__':
         del single
         torch.cuda.empty_cache()
 
+    print('writing to', args.save_path)
     with open(args.save_path, 'w') as w:
         json.dump(output, w)
 
