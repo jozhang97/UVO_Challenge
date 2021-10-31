@@ -10,6 +10,7 @@ import math
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -140,11 +141,14 @@ def context_index_bank(n_context, long_mem, N):
 def iou(sm, dm):
     return np.logical_and(sm, dm).astype(np.float32).sum() / (np.logical_or(sm, dm).astype(np.float32).sum() + 1e-6)
 
-def mask_matching(smasks, dmasks, thre=0.5):
+from sklearn.metrics.pairwise import cosine_distances
+cos = lambda a, b: cosine_distances(a[None], b[None]).squeeze()
+
+def mask_matching(smasks, dmasks, thre=0.5, dist_fn=iou):
     matching_matrix = np.zeros((len(smasks), len(dmasks)))
     for i in range(len(smasks)):
         for j in range(len(dmasks)):
-            matching_matrix[i,j] = iou(smasks[i], dmasks[j])
+            matching_matrix[i,j] = dist_fn(smasks[i], dmasks[j])
 
     matched_indexes = np.arange(len(smasks))[matching_matrix.max(1) > thre]
     matched_tgt_indexes = np.array([matching_matrix[i].argmax() for i in matched_indexes])
@@ -199,29 +203,30 @@ def warp_flow(img, flow, binarize=True):
 ######################################################################
 
 class CreateTrackers(object):
-    def __init__(self, real_masks, scores, n_context=0):
-        self.init_trackers(real_masks, scores)
+    def __init__(self, real_masks, scores, reids, n_context=0):
+        self.init_trackers(real_masks, scores, reids)
 
-    def init_trackers(self, real_masks, scores, n_context=0):
+    def init_trackers(self, real_masks, scores, reids, n_context=0):
         self.trackers = []
         self.dead_trackers = []
         for i in range(len(real_masks[0])):
-            tracker = Tracker(real_masks[0][i], scores[0][i], 0, 1)
+            tracker = Tracker(real_masks[0][i], scores[0][i], reids[0][i], 0, 1)
             self.trackers.append(tracker)
 
-    def add_tracker(self, real_mask, score, start_idx, end_idx):
+    def add_tracker(self, real_mask, score, reid, start_idx, end_idx):
         # mask shape: H*W
-        tracker = Tracker(real_mask, score, start_idx, end_idx)
+        tracker = Tracker(real_mask, score, reid, start_idx, end_idx)
         self.trackers.append(tracker)
 
 class Tracker(object):
-    def __init__(self, real_mask, score, start_idx, end_idx):
+    def __init__(self, real_mask, score, reid, start_idx, end_idx):
         self.alive = True
         self.dead_count = 0
         self.start_idx = start_idx
         self.end_idx = end_idx
         self.real_masks = [real_mask]
         self.score = score
+        self.reid = reid
 
     def kill(self):
         self.alive = False
@@ -229,6 +234,7 @@ class Tracker(object):
     def update(self, real_mask, score, idx):
         self.real_masks.append(real_mask)
         self.score += score
+        # TODO exponentially weighted reid
 
 class SingleVideo(object):
     def __init__(self, images_path, masks_path, mask_per_frame, nms_thre, mask_matching_thre, patience):
@@ -259,6 +265,7 @@ class SingleVideo(object):
         self.load_masks()
         # self.load_model()
         assert len(self.imgs) == len(self.masks)
+        assert len(self.imgs) == len(self.reids)
         assert len(self.flows) == len(self.imgs) - 1
 
     def load_imgs(self):
@@ -270,9 +277,11 @@ class SingleVideo(object):
     def load_masks(self):
         self.masks = []
         self.scores = []
+        self.reids = []
         for ins_path in tqdm(self.masks_path):
             masks = []
             scores = []
+            reids = []
             f = json.load(open(ins_path, 'r'))
             f = sorted(f, key=lambda x:-x['score'])
             for i in f:
@@ -280,12 +289,15 @@ class SingleVideo(object):
                 score = i['score']
                 masks.append(mask)
                 scores.append(score)
+                reids.append(i.get('reid', np.random.randn(10)))
             masks = np.array(masks)
             keep_indexes = mask_nms(masks, self.mask_per_frame, self.nms_thre)
             masks = [masks[i] for i in keep_indexes][:self.mask_per_frame]
             scores = [scores[i] for i in keep_indexes][:self.mask_per_frame]
+            reids = [reids[i] for i in keep_indexes][:self.mask_per_frame]
             self.masks.append(masks)
             self.scores.append(scores)
+            self.reids.append(reids)
         print(len(self.masks), ' Masks Loaded')
 
     def load_flow(self):
@@ -304,19 +316,6 @@ class SingleVideo(object):
             flow[:,:,1] *= h
             self.flows.append(flow)
         print(len(self.flows), 'Flows Generated')
-
-    #def load_masks(self):
-    #    self.masks = []
-    #    for ins_path in self.masks_path:
-    #        masks = []
-    #        mask_ens = Image.open(ins_path)
-    #        mask_ens = np.atleast_3d(mask_ens)[...,0]
-    #        for i in np.unique(mask_ens):
-    #            if i == 0:
-    #                continue
-    #            masks.append((mask_ens == i).astype(np.float32))
-    #        self.masks.append(masks)
-    #    print(len(self.masks), ' Masks Loaded')
 
     def load_model(self):
         self.args = utils_videowalk.arguments.test_args()
@@ -386,27 +385,35 @@ class SingleVideo(object):
         ##################################################################
         # Propagate Labels and Save Predictions
         ###################################################################
-        self.trackers = CreateTrackers(self.masks, self.scores)
+        self.trackers = CreateTrackers(self.masks, self.scores, self.reids)
 
         for t in tqdm(range(1, len(self.imgs))):
             propogated_masks = []
             propogated_preds = []
+
+            # warp existing masks
             for tracker in self.trackers.trackers:
                 prev_mask = tracker.real_masks[-1]
                 pred = warp_flow(prev_mask, self.flows[t-1])
                 propogated_masks.append(pred)
 
+            # iou costs, then argmax matching (not 1-1)
             detected_masks = self.masks[t]
             detected_scores = self.scores[t]
+            detected_reids = self.reids[t]
+            propogated_reids = np.array([tracker.reid for tracker in self.trackers.trackers])
             propogated_masks = np.array(propogated_masks)
             detected_masks = np.array(detected_masks)
             mtch_indexes, mtch_tgt_indexes, no_mtch_indexes, new_ins_indexes = mask_matching(propogated_masks, detected_masks, self.mask_matching_thre)
+            # mtch_indexes, mtch_tgt_indexes, no_mtch_indexes, new_ins_indexes = mask_matching(propogated_reids, detected_reids, self.mask_matching_thre, cos)
 
+            # handle matched tracks
             for src, tgt in zip(mtch_indexes, mtch_tgt_indexes):
                 self.trackers.trackers[src].update(detected_masks[tgt], detected_scores[tgt], t)
                 self.trackers.trackers[src].dead_count = 0
                 self.trackers.trackers[src].end_idx = t+1
 
+            # handle unmatched tracks
             dead_indexes = []
             for no_mtch in no_mtch_indexes:
                 self.trackers.trackers[no_mtch].dead_count += 1
@@ -423,12 +430,14 @@ class SingleVideo(object):
             for dead_index in dead_indexes:
                 self.trackers.trackers.pop(dead_index)
 
+            # nms
             self.remove_duplicate_trackers(t)
 
+            # handle unmatched detections
             for new_ins in new_ins_indexes:
                 if detected_masks[new_ins].sum() == 0:
                     continue
-                self.trackers.add_tracker(detected_masks[new_ins], detected_scores[new_ins], t, t+1)
+                self.trackers.add_tracker(detected_masks[new_ins], detected_scores[new_ins], detected_reids[new_ins], t, t+1)
 
     def format_results(self, save_path, vid):
         assert self.trackers is not None
@@ -478,8 +487,9 @@ class SingleVideo(object):
 def parse_args():
     parser = argparse.ArgumentParser(description='run flow track')
     parser.add_argument('--data-dir', default='./datasets/uvo/')
+    parser.add_argument('--seg-subdir', default='resources/seg_coco_val')
     parser.add_argument('--ann-path',
-        default='./datasets/vuo/annotations/UVO_video_val_dense.json',
+        default='./datasets/uvo/annotations/UVO_video_val_dense.json',
         help='not liketao!')
     parser.add_argument('--save-path', default='./subm.json')
     args = parser.parse_args()
@@ -497,7 +507,7 @@ if __name__ == '__main__':
     for vid in vids:
         vid_name = vid['ytid']
         img_dir = f'{args.data_dir}/uvo_videos_dense_frames/{vid_name}/'
-        msk_dir = f'{args.data_dir}/resources/seg_val/{vid_name}/'
+        msk_dir = f'{args.data_dir}/{args.seg_subdir}/{vid_name}/'
         single = SingleVideo(img_dir,
                             msk_dir,
                             100,
@@ -505,12 +515,15 @@ if __name__ == '__main__':
                             mask_matching_thre=0.5,
                             patience=5)
         single.inference()
+        # TODO remove below
+        # single.format_results('/tmp/uvo', vid)
         ins = single.format_submissions(name2id[vid_name], 5)
         output.extend(ins)
         del single
         torch.cuda.empty_cache()
 
     print('writing to', args.save_path)
+    Path(args.save_path).parent.mkdir(parents=True, exist_ok=True)
     with open(args.save_path, 'w') as w:
         json.dump(output, w)
 
