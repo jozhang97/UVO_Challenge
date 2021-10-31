@@ -237,7 +237,7 @@ class Tracker(object):
         # TODO exponentially weighted reid
 
 class SingleVideo(object):
-    def __init__(self, images_path, masks_path, mask_per_frame, nms_thre, mask_matching_thre, patience):
+    def __init__(self, images_path, masks_path, mask_per_frame, nms_thre, mask_matching_thre, patience, asso_metric):
         #self.images_path = glob.glob(images_path + '/*')
         #self.images_path.sort()
         masks_path_ = glob.glob(masks_path + '/*')
@@ -250,6 +250,7 @@ class SingleVideo(object):
         self.nms_thre = nms_thre
         self.mask_matching_thre = mask_matching_thre
         self.patience = patience
+        self.asso_metric = asso_metric
 
         #self.images_path = self.images_path[:10]
         #self.masks_path = self.masks_path[:10]
@@ -285,11 +286,15 @@ class SingleVideo(object):
             f = json.load(open(ins_path, 'r'))
             f = sorted(f, key=lambda x:-x['score'])
             for i in f:
+                reid = np.array(i.get('reid', np.random.randn(10)))
+                if np.linalg.norm(reid) < 1e-5 or np.any(np.isnan(reid)):
+                    print('reid with 0 or nan, skipping')
+                    continue
                 mask = transform_mask.decode(i['segmentation'])
                 score = i['score']
                 masks.append(mask)
                 scores.append(score)
-                reids.append(i.get('reid', np.random.randn(10)))
+                reids.append(reid)
             masks = np.array(masks)
             keep_indexes = mask_nms(masks, self.mask_per_frame, self.nms_thre)
             masks = [masks[i] for i in keep_indexes][:self.mask_per_frame]
@@ -404,8 +409,11 @@ class SingleVideo(object):
             propogated_reids = np.array([tracker.reid for tracker in self.trackers.trackers])
             propogated_masks = np.array(propogated_masks)
             detected_masks = np.array(detected_masks)
-            mtch_indexes, mtch_tgt_indexes, no_mtch_indexes, new_ins_indexes = mask_matching(propogated_masks, detected_masks, self.mask_matching_thre)
-            # mtch_indexes, mtch_tgt_indexes, no_mtch_indexes, new_ins_indexes = mask_matching(propogated_reids, detected_reids, self.mask_matching_thre, cos)
+
+            if self.asso_metric == 'iou':
+                mtch_indexes, mtch_tgt_indexes, no_mtch_indexes, new_ins_indexes = mask_matching(propogated_masks, detected_masks, self.mask_matching_thre)
+            elif self.asso_metric == 'reid':
+                mtch_indexes, mtch_tgt_indexes, no_mtch_indexes, new_ins_indexes = mask_matching(propogated_reids, detected_reids, self.mask_matching_thre, cos)
 
             # handle matched tracks
             for src, tgt in zip(mtch_indexes, mtch_tgt_indexes):
@@ -492,6 +500,7 @@ def parse_args():
         default='./datasets/uvo/annotations/UVO_video_val_dense.json',
         help='not liketao!')
     parser.add_argument('--save-path', default='./subm.json')
+    parser.add_argument('--asso-metric', default='iou')
     args = parser.parse_args()
     return args
 
@@ -513,7 +522,9 @@ if __name__ == '__main__':
                             100,
                             nms_thre=0.7,
                             mask_matching_thre=0.5,
-                            patience=5)
+                            patience=5,
+                            asso_metric=args.asso_metric,
+                            )
         single.inference()
         # TODO remove below
         # single.format_results('/tmp/uvo', vid)
